@@ -40,6 +40,9 @@ const DEFAULT_SETTINGS: AppSettings = {
     maxDailyLoss: 1000,
     maxTradesPerDay: 4,
   },
+  aiProvider: 'auto',
+  openRouterModel: 'google/gemini-2.5-flash',
+  groqModel: 'llama-3.3-70b-versatile',
 };
 
 export interface ToastMessage {

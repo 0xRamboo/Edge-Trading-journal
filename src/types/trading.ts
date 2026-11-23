@@ -260,12 +260,17 @@ export interface HardRiskRules {
   maxTradesPerDay: number;
 }
 
+export type AiProviderPreference = 'auto' | 'gemini' | 'openrouter' | 'groq';
+
 export interface AppSettings {
   id: string;
   displayCurrency: string; // 'USD'
   timezone: string;        // 'Asia/Kathmandu'
   theme: 'dark' | 'light';
   hardRiskRules: HardRiskRules;
+  aiProvider?: AiProviderPreference;
+  openRouterModel?: string;
+  groqModel?: string;
 }
 
 export const MISTAKE_TAGS = [

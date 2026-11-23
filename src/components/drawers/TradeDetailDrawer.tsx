@@ -53,6 +53,9 @@ export function TradeDetailDrawer() {
             averageR: baselineStats.averageR,
             expectancyCurrency: baselineStats.expectancyCurrency,
           },
+          provider: settings.aiProvider ?? 'auto',
+          openRouterModel: settings.openRouterModel,
+          groqModel: settings.groqModel,
         }),
       });
       const data = await res.json();

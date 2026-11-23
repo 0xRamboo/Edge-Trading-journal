@@ -1,8 +1,27 @@
 import React, { useRef, useState } from 'react';
-import { Database, Download, RotateCcw, Trash2, Upload, X } from 'lucide-react';
+import { Brain, Database, Download, RotateCcw, Trash2, Upload, X } from 'lucide-react';
 import { useJournal } from '../../context/JournalContext';
+import { AiProviderPreference } from '../../types/trading';
 import { SUPPORTED_CURRENCIES } from '../../utils/currency';
 import { SUPPORTED_TIMEZONES } from '../../utils/timezone';
+
+const POPULAR_OPENROUTER_MODELS = [
+  'openrouter/free',
+  'google/gemini-2.5-flash',
+  'openai/gpt-4o-mini',
+  'openai/gpt-4o',
+  'anthropic/claude-3.5-sonnet',
+  'deepseek/deepseek-chat',
+  'meta-llama/llama-3.3-70b-instruct',
+];
+
+const POPULAR_GROQ_MODELS = [
+  'llama-3.3-70b-versatile',
+  'meta-llama/llama-4-scout-17b-16e-instruct',
+  'meta-llama/llama-4-maverick-17b-128e-instruct',
+  'qwen/qwen3-32b',
+  'openai/gpt-oss-120b',
+];
 
 export function SettingsDataModal() {
   const {
@@ -97,6 +116,77 @@ export function SettingsDataModal() {
                     </option>
                   ))}
                 </select>
+              </div>
+            </div>
+          </section>
+
+          {/* AI Provider & Model */}
+          <section className="space-y-3 border-t border-slate-200 dark:border-slate-800 pt-5">
+            <div className="flex items-center gap-2">
+              <Brain className="h-4 w-4 text-blue-500" />
+              <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                AI Provider & Model Routing
+              </h3>
+            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Configure <span className="font-mono">GEMINI_API_KEY</span>,{' '}
+              <span className="font-mono">OPENROUTER_API_KEY</span>, and/or{' '}
+              <span className="font-mono">GROQ_API_KEY</span> in AI Studio&apos;s{' '}
+              <strong>Settings &gt; Secrets</strong> panel. Requests run strictly on the backend server.
+            </p>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">
+                  Active AI Provider
+                </label>
+                <select
+                  value={settings.aiProvider ?? 'auto'}
+                  onChange={(e) =>
+                    void updateSettings({ aiProvider: e.target.value as AiProviderPreference })
+                  }
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-sm text-slate-900 dark:text-slate-100"
+                >
+                  <option value="auto">Auto (Gemini → OpenRouter → Groq)</option>
+                  <option value="gemini">Google Gemini (gemini-4-hydrogen)</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="groq">Groq</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">
+                  OpenRouter Model Slug
+                </label>
+                <input
+                  type="text"
+                  list="openrouter-model-presets"
+                  value={settings.openRouterModel ?? 'google/gemini-2.5-flash'}
+                  onChange={(e) => void updateSettings({ openRouterModel: e.target.value })}
+                  placeholder="e.g. google/gemini-2.5-flash"
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 font-mono text-xs text-slate-900 dark:text-slate-100"
+                />
+                <datalist id="openrouter-model-presets">
+                  {POPULAR_OPENROUTER_MODELS.map((m) => (
+                    <option key={m} value={m} />
+                  ))}
+                </datalist>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">
+                  Groq Model Slug
+                </label>
+                <input
+                  type="text"
+                  list="groq-model-presets"
+                  value={settings.groqModel ?? 'llama-3.3-70b-versatile'}
+                  onChange={(e) => void updateSettings({ groqModel: e.target.value })}
+                  placeholder="e.g. llama-3.3-70b-versatile"
+                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 font-mono text-xs text-slate-900 dark:text-slate-100"
+                />
+                <datalist id="groq-model-presets">
+                  {POPULAR_GROQ_MODELS.map((m) => (
+                    <option key={m} value={m} />
+                  ))}
+                </datalist>
               </div>
             </div>
           </section>

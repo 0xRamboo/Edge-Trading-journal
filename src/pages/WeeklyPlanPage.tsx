@@ -174,6 +174,9 @@ export function WeeklyPlanPage() {
             rulesFollowed: weekTrades.filter((t) => t.rulesFollowed).length,
             mistakes: weekTrades.flatMap((t) => t.mistakeTags),
           },
+          provider: settings.aiProvider ?? 'auto',
+          openRouterModel: settings.openRouterModel,
+          groqModel: settings.groqModel,
         }),
       });
       const data = await res.json();

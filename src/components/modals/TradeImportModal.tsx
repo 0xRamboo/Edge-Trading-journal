@@ -397,6 +397,9 @@ export function TradeImportModal() {
             mimeType: file.type || 'image/png',
             defaultCurrency: settings.displayCurrency,
             defaultTimezone: settings.timezone,
+            provider: settings.aiProvider ?? 'auto',
+            openRouterModel: settings.openRouterModel,
+            groqModel: settings.groqModel,
           }),
         });
         const data = await res.json();

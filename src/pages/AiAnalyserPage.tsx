@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { AlertTriangle, Brain, Loader2, Printer, Send, Trash2 } from 'lucide-react';
 import { EmptyState } from '../components/ui/EmptyState';
 import { useJournal } from '../context/JournalContext';
-import { AiReport } from '../types/trading';
+import { AiProviderPreference, AiReport } from '../types/trading';
 import {
   buildJournalContextForAi,
   calculatePerformance,
@@ -19,6 +19,7 @@ export function AiAnalyserPage() {
     liveTrades,
     aiReports,
     settings,
+    updateSettings,
     saveAiReport,
     deleteAiReport,
     pushToast,
@@ -151,6 +152,9 @@ export function AiAnalyserPage() {
             mistakeCosts: currentSnapshot.mistakeCosts,
             rulesFollowedStats: currentSnapshot.rulesFollowedStats,
           },
+          provider: settings.aiProvider ?? 'auto',
+          openRouterModel: settings.openRouterModel,
+          groqModel: settings.groqModel,
         }),
       });
       const data = await res.json();
@@ -227,6 +231,9 @@ export function AiAnalyserPage() {
           question: q,
           history: chatHistory,
           journalSnapshot: snapshot,
+          provider: settings.aiProvider ?? 'auto',
+          openRouterModel: settings.openRouterModel,
+          groqModel: settings.groqModel,
         }),
       });
       const data = await res.json();
@@ -325,6 +332,20 @@ export function AiAnalyserPage() {
                 {a.name}
               </option>
             ))}
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">AI Provider</label>
+          <select
+            value={settings.aiProvider ?? 'auto'}
+            onChange={(e) => void updateSettings({ aiProvider: e.target.value as AiProviderPreference })}
+            className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-xs"
+          >
+            <option value="auto">Auto (Gemini · OpenRouter · Groq)</option>
+            <option value="gemini">Google Gemini</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="groq">Groq</option>
           </select>
         </div>
 
