@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import express, { Request, Response } from 'express';
+import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
@@ -39,6 +40,7 @@ function handleAiError(res: Response, err: unknown) {
 
 async function startServer() {
   const app = express();
+  const httpServer = http.createServer(app);
   app.use(express.json({ limit: '15mb' }));
 
   // Health endpoint
@@ -293,7 +295,25 @@ Answer directly using only the numbers and patterns in the Trader Journal Data S
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        allowedHosts: true,
+        ws: { server: httpServer },
+      },
+      plugins: [
+        {
+          name: 'edgeledger-attach-http-ws',
+          config() {
+            return {
+              server: {
+                allowedHosts: true,
+                ws: { server: httpServer },
+                ...(process.env.DISABLE_HMR === 'true' ? { hmr: false } : {}),
+              },
+            };
+          },
+        },
+      ],
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -305,7 +325,7 @@ Answer directly using only the numbers and patterns in the Trader Journal Data S
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`EdgeLedger server listening on http://0.0.0.0:${PORT}`);
   });
 }
