@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <rect width="512" height="512" rx="112" fill="#090D16" />
+  <rect x="24" y="24" width="464" height="464" rx="92" stroke="#1E293B" stroke-width="8" />
+  <!-- Ascending candlestick bars -->
+  <rect x="128" y="268" width="40" height="96" rx="8" fill="#3B82F6" />
+  <rect x="144" y="236" width="8" height="156" rx="4" fill="#3B82F6" />
+  <rect x="236" y="204" width="40" height="128" rx="8" fill="#2563EB" />
+  <rect x="252" y="168" width="8" height="196" rx="4" fill="#2563EB" />
+  <rect x="344" y="140" width="40" height="148" rx="8" fill="#10B981" />
+  <rect x="360" y="108" width="8" height="212" rx="4" fill="#10B981" />
+  <!-- Equity edge line -->
+  <path d="M108 384L204 316L284 340L404 168" stroke="#F8FAFC" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" />
+  <circle cx="404" cy="168" r="14" fill="#10B981" stroke="#F8FAFC" stroke-width="6" />
+</svg>

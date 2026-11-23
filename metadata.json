@@ -1,0 +1,8 @@
+{
+  "name": "EdgeLedger",
+  "description": "Professional multi-account trading journal, R-multiple analytics, strategy playbook, backtesting, and AI performance coach.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
