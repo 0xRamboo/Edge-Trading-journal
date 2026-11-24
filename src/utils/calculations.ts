@@ -12,7 +12,9 @@ import {
   getDateKeyInTimezone,
   getHourInTimezone,
   getMonthKeyInTimezone,
+  getWeekBoundsFromDateKey,
   getWeekdayInTimezone,
+  getWeekIdFromDateKey,
   WEEKDAY_NAMES,
 } from './timezone';
 
@@ -1120,5 +1122,463 @@ export function buildJournalContextForAi(
     mistakeCosts,
     rulesFollowedStats,
     checklistRuleCount: checklistRules.length,
+  };
+}
+
+export type ConsistencyRuleStatus = 'PASS' | 'ABOVE_CAP' | 'INSUFFICIENT_DAYS' | 'NO_NET_PROFIT';
+
+export interface ConsistencyDayRow {
+  dateKey: string;
+  netPnl: number;
+  trades: number;
+  wins: number;
+  losses: number;
+  rulesFollowedPct: number;
+  shareOfProfitPct: number;
+  isBestDay: boolean;
+  dailyLossBreached: boolean;
+  dailyTradeCapBreached: boolean;
+}
+
+export interface ConsistencyWeekRow {
+  weekId: string;
+  weekStart: string;
+  weekEnd: string;
+  weekLabel: string;
+  trades: number;
+  activeDays: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  netPnl: number;
+  rulesFollowedPct: number;
+  dailyBreachesCount: number;
+}
+
+export interface ConsistencyRollingPoint {
+  index: number;
+  dateKey: string;
+  instrument: string;
+  rollingWinRatePct: number;
+  rollingRulesPct: number;
+  cumulativeNetPnl: number;
+}
+
+export interface ConsistencyMetrics {
+  closedTrades: number;
+  totalNetPnl: number;
+  maxDayShareRulePct: number;
+  ruleStatus: ConsistencyRuleStatus;
+  bestDaySharePct: number | null;
+  requiredTotalProfit: number;
+  additionalProfitNeeded: number;
+  bestDay: { dateKey: string; netPnl: number; trades: number; sharePct: number | null } | null;
+  worstDay: { dateKey: string; netPnl: number; trades: number } | null;
+  activeDaysCount: number;
+  greenDaysCount: number;
+  redDaysCount: number;
+  flatDaysCount: number;
+  greenDayRatePct: number;
+  avgGreenDay: number;
+  avgRedDay: number;
+  greenRedDayRatio: number;
+  dailyPnlStdDev: number;
+  currentDayStreak: number;
+  longestGreenDayStreak: number;
+  longestRedDayStreak: number;
+  totalWeeks: number;
+  greenWeeks: number;
+  greenWeekRatePct: number;
+  rulesFollowedPct: number;
+  checklistCompletionPct: number | null;
+  validStopLossPct: number;
+  sizingConsistencyPct: number;
+  medianLotSize: number;
+  riskPerTradeRespectedPct: number;
+  dailyLossLimitRespectedPct: number;
+  dailyTradeCapRespectedPct: number;
+  noMistakeRatePct: number;
+  dailyRows: ConsistencyDayRow[];
+  weeklyRows: ConsistencyWeekRow[];
+  rollingWindows: ConsistencyRollingPoint[];
+}
+
+function formatShortWeekRange(weekStart: string, weekEnd: string): string {
+  const fmt = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const startDt = new Date(`${weekStart}T12:00:00Z`);
+  const endDt = new Date(`${weekEnd}T12:00:00Z`);
+  if (Number.isNaN(startDt.getTime()) || Number.isNaN(endDt.getTime())) return `${weekStart} – ${weekEnd}`;
+  return `${fmt.format(startDt)} – ${fmt.format(endDt)}`;
+}
+
+/**
+ * Computes prop-firm day concentration, daily/weekly consistency,
+ * execution stability, and hard-risk rule compliance from closed trades.
+ */
+export function calculateConsistencyMetrics(
+  trades: Trade[],
+  accountsMap: Map<string, Account>,
+  displayCurrency: string,
+  timeZone: string,
+  hardRules: HardRiskRules,
+  maxDayShareRulePct = 30
+): ConsistencyMetrics {
+  const ruleThreshold = Math.min(100, Math.max(5, maxDayShareRulePct));
+  const closed = trades
+    .filter((t) => t.status !== 'OPEN')
+    .slice()
+    .sort((a, b) => {
+      const ta = new Date(a.closeTime || a.openTime).getTime();
+      const tb = new Date(b.closeTime || b.openTime).getTime();
+      return ta - tb;
+    });
+
+  if (closed.length === 0) {
+    return {
+      closedTrades: 0,
+      totalNetPnl: 0,
+      maxDayShareRulePct: ruleThreshold,
+      ruleStatus: 'NO_NET_PROFIT',
+      bestDaySharePct: null,
+      requiredTotalProfit: 0,
+      additionalProfitNeeded: 0,
+      bestDay: null,
+      worstDay: null,
+      activeDaysCount: 0,
+      greenDaysCount: 0,
+      redDaysCount: 0,
+      flatDaysCount: 0,
+      greenDayRatePct: 0,
+      avgGreenDay: 0,
+      avgRedDay: 0,
+      greenRedDayRatio: 0,
+      dailyPnlStdDev: 0,
+      currentDayStreak: 0,
+      longestGreenDayStreak: 0,
+      longestRedDayStreak: 0,
+      totalWeeks: 0,
+      greenWeeks: 0,
+      greenWeekRatePct: 0,
+      rulesFollowedPct: 100,
+      checklistCompletionPct: null,
+      validStopLossPct: 0,
+      sizingConsistencyPct: 100,
+      medianLotSize: 0,
+      riskPerTradeRespectedPct: 100,
+      dailyLossLimitRespectedPct: 100,
+      dailyTradeCapRespectedPct: 100,
+      noMistakeRatePct: 100,
+      dailyRows: [],
+      weeklyRows: [],
+      rollingWindows: [],
+    };
+  }
+
+  let totalNetPnl = 0;
+  let rulesFollowedCount = 0;
+  let validSlCount = 0;
+  let riskRespectedCount = 0;
+  let noMistakeCount = 0;
+  let checkSum = 0;
+  let checkCount = 0;
+  const lotSizes: number[] = [];
+
+  interface DayAcc {
+    dateKey: string;
+    netPnl: number;
+    trades: number;
+    wins: number;
+    losses: number;
+    rulesFollowedCount: number;
+  }
+
+  const dayMap = new Map<string, DayAcc>();
+  const rollingWindows: ConsistencyRollingPoint[] = [];
+  const windowBuffer: { win: boolean; rulesFollowed: boolean }[] = [];
+
+  for (let i = 0; i < closed.length; i++) {
+    const t = closed[i];
+    const accCur = accountsMap.get(t.accountId)?.currency ?? 'USD';
+    const pnl = convertCurrency(t.netPnl, accCur, displayCurrency);
+    totalNetPnl += pnl;
+
+    if (t.rulesFollowed) rulesFollowedCount += 1;
+    if (hasValidStopLoss(t)) validSlCount += 1;
+    if (t.mistakeTags.length === 0) noMistakeCount += 1;
+
+    const overMaxRisk =
+      t.initialRiskPct !== null &&
+      Number.isFinite(t.initialRiskPct) &&
+      t.initialRiskPct > hardRules.maxRiskPerTradePct + 0.05;
+    if (!overMaxRisk && !t.mistakeTags.includes('Oversized')) {
+      riskRespectedCount += 1;
+    }
+
+    if (t.checklistResult && t.checklistResult.total > 0) {
+      checkSum += (t.checklistResult.completed / t.checklistResult.total) * 100;
+      checkCount += 1;
+    }
+
+    if (Number.isFinite(t.size) && t.size > 0) {
+      lotSizes.push(t.size);
+    }
+
+    const dk = getDateKeyInTimezone(t.closeTime || t.openTime, timeZone) || '1970-01-01';
+    const dayAcc = dayMap.get(dk) ?? {
+      dateKey: dk,
+      netPnl: 0,
+      trades: 0,
+      wins: 0,
+      losses: 0,
+      rulesFollowedCount: 0,
+    };
+    dayAcc.netPnl += pnl;
+    dayAcc.trades += 1;
+    if (pnl > 0.0001) dayAcc.wins += 1;
+    else if (pnl < -0.0001) dayAcc.losses += 1;
+    if (t.rulesFollowed) dayAcc.rulesFollowedCount += 1;
+    dayMap.set(dk, dayAcc);
+
+    windowBuffer.push({ win: pnl > 0.0001, rulesFollowed: t.rulesFollowed });
+    if (windowBuffer.length > 5) windowBuffer.shift();
+    const wWins = windowBuffer.filter((w) => w.win).length;
+    const wRules = windowBuffer.filter((w) => w.rulesFollowed).length;
+    rollingWindows.push({
+      index: i + 1,
+      dateKey: dk,
+      instrument: t.instrument,
+      rollingWinRatePct: (wWins / windowBuffer.length) * 100,
+      rollingRulesPct: (wRules / windowBuffer.length) * 100,
+      cumulativeNetPnl: totalNetPnl,
+    });
+  }
+
+  // Sizing consistency around median position size (0.5x to 1.5x median)
+  let medianLotSize = 0;
+  let sizingConsistencyPct = 100;
+  if (lotSizes.length > 0) {
+    const sortedLots = lotSizes.slice().sort((a, b) => a - b);
+    const mid = Math.floor(sortedLots.length / 2);
+    medianLotSize =
+      sortedLots.length % 2 === 1
+        ? sortedLots[mid]
+        : (sortedLots[mid - 1] + sortedLots[mid]) / 2;
+    if (medianLotSize > 0) {
+      const withinBand = lotSizes.filter((s) => s >= medianLotSize * 0.5 && s <= medianLotSize * 1.5).length;
+      sizingConsistencyPct = (withinBand / lotSizes.length) * 100;
+    }
+  }
+
+  const orderedDays = Array.from(dayMap.values()).sort((a, b) => a.dateKey.localeCompare(b.dateKey));
+  const activeDaysCount = orderedDays.length;
+
+  let greenDaysCount = 0;
+  let redDaysCount = 0;
+  let flatDaysCount = 0;
+  let greenDaySum = 0;
+  let redDaySum = 0;
+  let longestGreenDayStreak = 0;
+  let longestRedDayStreak = 0;
+  let runGreen = 0;
+  let runRed = 0;
+  let currentDayStreak = 0;
+  let dailyLossOkCount = 0;
+  let dailyCapOkCount = 0;
+
+  let topDay: DayAcc | null = null;
+  let bottomDay: DayAcc | null = null;
+
+  for (const d of orderedDays) {
+    if (!topDay || d.netPnl > topDay.netPnl) topDay = d;
+    if (!bottomDay || d.netPnl < bottomDay.netPnl) bottomDay = d;
+
+    if (d.netPnl > 0.0001) {
+      greenDaysCount += 1;
+      greenDaySum += d.netPnl;
+      runGreen += 1;
+      runRed = 0;
+      if (runGreen > longestGreenDayStreak) longestGreenDayStreak = runGreen;
+      currentDayStreak = runGreen;
+    } else if (d.netPnl < -0.0001) {
+      redDaysCount += 1;
+      redDaySum += Math.abs(d.netPnl);
+      runRed += 1;
+      runGreen = 0;
+      if (runRed > longestRedDayStreak) longestRedDayStreak = runRed;
+      currentDayStreak = -runRed;
+    } else {
+      flatDaysCount += 1;
+    }
+
+    const lossOk = hardRules.maxDailyLoss <= 0 || d.netPnl >= -hardRules.maxDailyLoss;
+    const capOk = hardRules.maxTradesPerDay <= 0 || d.trades <= hardRules.maxTradesPerDay;
+    if (lossOk) dailyLossOkCount += 1;
+    if (capOk) dailyCapOkCount += 1;
+  }
+
+  const avgDailyMean = activeDaysCount > 0 ? totalNetPnl / activeDaysCount : 0;
+  const dailyVariance =
+    activeDaysCount > 0
+      ? orderedDays.reduce((s, d) => s + Math.pow(d.netPnl - avgDailyMean, 2), 0) / activeDaysCount
+      : 0;
+  const dailyPnlStdDev = Math.sqrt(dailyVariance);
+
+  const avgGreenDay = greenDaysCount > 0 ? greenDaySum / greenDaysCount : 0;
+  const avgRedDay = redDaysCount > 0 ? redDaySum / redDaysCount : 0;
+  const greenRedDayRatio =
+    avgRedDay === 0 ? (avgGreenDay > 0 ? Infinity : 0) : avgGreenDay / avgRedDay;
+
+  let bestDaySharePct: number | null = null;
+  let requiredTotalProfit = 0;
+  let additionalProfitNeeded = 0;
+  let ruleStatus: ConsistencyRuleStatus = 'NO_NET_PROFIT';
+
+  if (topDay && topDay.netPnl > 0.0001) {
+    requiredTotalProfit = topDay.netPnl / (ruleThreshold / 100);
+    if (totalNetPnl > 0.0001) {
+      bestDaySharePct = (topDay.netPnl / totalNetPnl) * 100;
+      additionalProfitNeeded = Math.max(0, requiredTotalProfit - totalNetPnl);
+      if (activeDaysCount < 2) {
+        ruleStatus = 'INSUFFICIENT_DAYS';
+      } else if (bestDaySharePct <= ruleThreshold) {
+        ruleStatus = 'PASS';
+      } else {
+        ruleStatus = 'ABOVE_CAP';
+      }
+    } else {
+      additionalProfitNeeded = Math.max(0, requiredTotalProfit - totalNetPnl);
+      ruleStatus = 'NO_NET_PROFIT';
+    }
+  } else if (totalNetPnl > 0.0001) {
+    bestDaySharePct = 0;
+    ruleStatus = activeDaysCount >= 2 ? 'PASS' : 'INSUFFICIENT_DAYS';
+  }
+
+  const dailyRows: ConsistencyDayRow[] = orderedDays.map((d) => ({
+    dateKey: d.dateKey,
+    netPnl: d.netPnl,
+    trades: d.trades,
+    wins: d.wins,
+    losses: d.losses,
+    rulesFollowedPct: d.trades > 0 ? (d.rulesFollowedCount / d.trades) * 100 : 100,
+    shareOfProfitPct: totalNetPnl > 0.0001 && d.netPnl > 0 ? (d.netPnl / totalNetPnl) * 100 : 0,
+    isBestDay: Boolean(topDay && d.dateKey === topDay.dateKey && topDay.netPnl > 0.0001),
+    dailyLossBreached: hardRules.maxDailyLoss > 0 && d.netPnl < -hardRules.maxDailyLoss,
+    dailyTradeCapBreached: hardRules.maxTradesPerDay > 0 && d.trades > hardRules.maxTradesPerDay,
+  }));
+
+  // Group into ISO weeks
+  const weekMap = new Map<
+    string,
+    {
+      weekId: string;
+      weekStart: string;
+      weekEnd: string;
+      trades: number;
+      activeDays: number;
+      wins: number;
+      losses: number;
+      netPnl: number;
+      rulesFollowedCount: number;
+      dailyBreachesCount: number;
+    }
+  >();
+
+  for (const d of dailyRows) {
+    const weekId = getWeekIdFromDateKey(d.dateKey);
+    const { weekStart, weekEnd } = getWeekBoundsFromDateKey(d.dateKey);
+    const existing = weekMap.get(weekId) ?? {
+      weekId,
+      weekStart,
+      weekEnd,
+      trades: 0,
+      activeDays: 0,
+      wins: 0,
+      losses: 0,
+      netPnl: 0,
+      rulesFollowedCount: 0,
+      dailyBreachesCount: 0,
+    };
+    const origDay = dayMap.get(d.dateKey);
+    existing.trades += d.trades;
+    existing.activeDays += 1;
+    existing.wins += d.wins;
+    existing.losses += d.losses;
+    existing.netPnl += d.netPnl;
+    existing.rulesFollowedCount += origDay?.rulesFollowedCount ?? 0;
+    if (d.dailyLossBreached || d.dailyTradeCapBreached) existing.dailyBreachesCount += 1;
+    weekMap.set(weekId, existing);
+  }
+
+  const weeklyRows: ConsistencyWeekRow[] = Array.from(weekMap.values())
+    .sort((a, b) => b.weekStart.localeCompare(a.weekStart))
+    .map((w) => ({
+      weekId: w.weekId,
+      weekStart: w.weekStart,
+      weekEnd: w.weekEnd,
+      weekLabel: formatShortWeekRange(w.weekStart, w.weekEnd),
+      trades: w.trades,
+      activeDays: w.activeDays,
+      wins: w.wins,
+      losses: w.losses,
+      winRate: w.trades > 0 ? (w.wins / w.trades) * 100 : 0,
+      netPnl: w.netPnl,
+      rulesFollowedPct: w.trades > 0 ? (w.rulesFollowedCount / w.trades) * 100 : 100,
+      dailyBreachesCount: w.dailyBreachesCount,
+    }));
+
+  const totalWeeks = weeklyRows.length;
+  const greenWeeks = weeklyRows.filter((w) => w.netPnl > 0.0001).length;
+
+  return {
+    closedTrades: closed.length,
+    totalNetPnl,
+    maxDayShareRulePct: ruleThreshold,
+    ruleStatus,
+    bestDaySharePct,
+    requiredTotalProfit,
+    additionalProfitNeeded,
+    bestDay: topDay
+      ? {
+          dateKey: topDay.dateKey,
+          netPnl: topDay.netPnl,
+          trades: topDay.trades,
+          sharePct: totalNetPnl > 0.0001 && topDay.netPnl > 0 ? (topDay.netPnl / totalNetPnl) * 100 : null,
+        }
+      : null,
+    worstDay: bottomDay
+      ? {
+          dateKey: bottomDay.dateKey,
+          netPnl: bottomDay.netPnl,
+          trades: bottomDay.trades,
+        }
+      : null,
+    activeDaysCount,
+    greenDaysCount,
+    redDaysCount,
+    flatDaysCount,
+    greenDayRatePct: activeDaysCount > 0 ? (greenDaysCount / activeDaysCount) * 100 : 0,
+    avgGreenDay,
+    avgRedDay,
+    greenRedDayRatio,
+    dailyPnlStdDev,
+    currentDayStreak,
+    longestGreenDayStreak,
+    longestRedDayStreak,
+    totalWeeks,
+    greenWeeks,
+    greenWeekRatePct: totalWeeks > 0 ? (greenWeeks / totalWeeks) * 100 : 0,
+    rulesFollowedPct: (rulesFollowedCount / closed.length) * 100,
+    checklistCompletionPct: checkCount > 0 ? checkSum / checkCount : null,
+    validStopLossPct: (validSlCount / closed.length) * 100,
+    sizingConsistencyPct,
+    medianLotSize,
+    riskPerTradeRespectedPct: (riskRespectedCount / closed.length) * 100,
+    dailyLossLimitRespectedPct: activeDaysCount > 0 ? (dailyLossOkCount / activeDaysCount) * 100 : 100,
+    dailyTradeCapRespectedPct: activeDaysCount > 0 ? (dailyCapOkCount / activeDaysCount) * 100 : 100,
+    noMistakeRatePct: (noMistakeCount / closed.length) * 100,
+    dailyRows,
+    weeklyRows,
+    rollingWindows,
   };
 }

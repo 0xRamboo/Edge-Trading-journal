@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   AlertTriangle,
   BarChart3,
@@ -22,6 +22,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import { ConsistencyTab } from '../components/dashboard/ConsistencyTab';
 import { AccountProgressCard } from '../components/ui/AccountProgressCard';
 import { EmptyState } from '../components/ui/EmptyState';
 import { useJournal } from '../context/JournalContext';
@@ -53,6 +54,8 @@ export function DashboardPage() {
     setJournalDateDrawer,
     setActivePage,
   } = useJournal();
+
+  const [dashboardTab, setDashboardTab] = useState<'overview' | 'consistency'>('overview');
 
   const activeAccounts = useMemo(() => accounts.filter((a) => !a.archived), [accounts]);
   const accountsMap = useMemo(() => new Map(accounts.map((a) => [a.id, a])), [accounts]);
@@ -252,8 +255,47 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      {/* Pattern Alerts Banner */}
-      {patternAlerts.length > 0 && (
+      {/* Dashboard View Switch */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-1 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-1.5 w-fit">
+          {(
+            [
+              ['overview', 'Overview'],
+              ['consistency', 'Consistency'],
+            ] as const
+          ).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setDashboardTab(id)}
+              className={`rounded-lg px-3.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                dashboardTab === id
+                  ? 'bg-blue-600 text-white'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className="font-mono text-xs tabular-nums text-slate-500 dark:text-slate-400">
+          {metrics.closedTrades} closed · {metrics.openTrades} open
+        </div>
+      </div>
+
+      {dashboardTab === 'consistency' ? (
+        <ConsistencyTab
+          trades={filteredLiveTrades}
+          accountsMap={accountsMap}
+          displayCurrency={cur}
+          timeZone={settings.timezone}
+          hardRiskRules={settings.hardRiskRules}
+          onSelectDate={(dk) => setJournalDateDrawer(dk)}
+        />
+      ) : (
+        <>
+          {/* Pattern Alerts Banner */}
+          {patternAlerts.length > 0 && (
         <div className="grid gap-3 md:grid-cols-2">
           {patternAlerts.slice(0, 2).map((alert) => (
             <div
@@ -674,6 +716,8 @@ export function DashboardPage() {
             ))}
           </div>
         </div>
+      )}
+        </>
       )}
     </div>
   );
