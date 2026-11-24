@@ -59,7 +59,7 @@ export function formatCurrency(
 }
 
 export function formatR(r: number | null | undefined, signed = true): string {
-  if (r === null || r === undefined || !Number.isFinite(r)) return '—';
+  if (r === null || r === undefined || !Number.isFinite(r)) return 'N/A';
   const prefix = signed && r > 0 ? '+' : '';
   return `${prefix}${r.toFixed(2)}R`;
 }

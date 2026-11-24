@@ -13,7 +13,7 @@ import {
   TradeStatus,
   TradingSession,
 } from '../../types/trading';
-import { computeRiskAndR, computeTradeGrossPnl } from '../../utils/calculations';
+import { computeRiskAndR, computeTradeGrossPnl, parsePositivePrice } from '../../utils/calculations';
 import { formatCurrency, formatR } from '../../utils/currency';
 import { localDateTimeToUtcIso, utcIsoToLocalInput } from '../../utils/timezone';
 
@@ -93,11 +93,15 @@ export function TradeEntryModal() {
       setCloseTimeLocal(editTrade.closeTime ? utcIsoToLocalInput(editTrade.closeTime, settings.timezone) : '');
       setEntryPrice(String(editTrade.entryPrice));
       setExitPrice(editTrade.exitPrice !== null ? String(editTrade.exitPrice) : '');
-      setStopLoss(editTrade.stopLoss !== null ? String(editTrade.stopLoss) : '');
-      setTakeProfit(editTrade.takeProfit !== null ? String(editTrade.takeProfit) : '');
+      setStopLoss(editTrade.stopLoss !== null && editTrade.stopLoss > 0 ? String(editTrade.stopLoss) : '');
+      setTakeProfit(editTrade.takeProfit !== null && editTrade.takeProfit > 0 ? String(editTrade.takeProfit) : '');
       setSize(String(editTrade.size));
       setMultiplier(String(editTrade.contractMultiplier ?? 1));
-      setExplicitRiskAmount(editTrade.initialRiskAmount !== null ? String(editTrade.initialRiskAmount) : '');
+      setExplicitRiskAmount(
+        editTrade.stopLoss !== null && editTrade.stopLoss > 0 && editTrade.initialRiskAmount !== null
+          ? String(editTrade.initialRiskAmount)
+          : ''
+      );
       setFees(String(editTrade.fees));
       setCommission(String(editTrade.commission));
       setSwap(String(editTrade.swap));
@@ -183,8 +187,8 @@ export function TradeEntryModal() {
   const previewCalc = useMemo(() => {
     const ep = parseFloat(entryPrice);
     const xp = exitPrice ? parseFloat(exitPrice) : null;
-    const sl = stopLoss ? parseFloat(stopLoss) : null;
-    const tp = takeProfit ? parseFloat(takeProfit) : null;
+    const sl = parsePositivePrice(stopLoss);
+    const tp = parsePositivePrice(takeProfit);
     const sz = parseFloat(size) || 0;
     const mult = parseFloat(multiplier) || 1;
     const totalFee = (parseFloat(fees) || 0) + (parseFloat(commission) || 0) + (parseFloat(swap) || 0);
@@ -218,6 +222,7 @@ export function TradeEntryModal() {
       size: sz,
       contractMultiplier: mult,
       netPnl: net,
+      direction,
       explicitRiskAmount: expRisk,
     });
 
@@ -343,9 +348,9 @@ export function TradeEntryModal() {
       openTime: openIso,
       closeTime: closeIso,
       entryPrice: ep,
-      exitPrice: exitPrice ? parseFloat(exitPrice) : null,
-      stopLoss: stopLoss ? parseFloat(stopLoss) : null,
-      takeProfit: takeProfit ? parseFloat(takeProfit) : null,
+      exitPrice: parsePositivePrice(exitPrice),
+      stopLoss: parsePositivePrice(stopLoss),
+      takeProfit: parsePositivePrice(takeProfit),
       size: sz,
       contractMultiplier: parseFloat(multiplier) || 1,
       initialRiskAmount: previewCalc.initialRiskAmount,
@@ -430,7 +435,11 @@ export function TradeEntryModal() {
               <div className="text-xs text-slate-500 dark:text-slate-400">Actual R</div>
               <div
                 className={`mt-0.5 font-mono text-base font-semibold tabular-nums ${
-                  (previewCalc.actualR ?? 0) >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'
+                  previewCalc.actualR === null
+                    ? 'text-slate-500 dark:text-slate-400'
+                    : previewCalc.actualR >= 0
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : 'text-red-600 dark:text-red-400'
                 }`}
               >
                 {formatR(previewCalc.actualR)}
@@ -449,7 +458,7 @@ export function TradeEntryModal() {
             <div>
               <div className="text-xs text-slate-500 dark:text-slate-400">Planned R:R</div>
               <div className="mt-0.5 font-mono text-base font-semibold text-slate-900 dark:text-slate-100 tabular-nums">
-                {previewCalc.plannedRR !== null ? `1 : ${previewCalc.plannedRR.toFixed(2)}` : '—'}
+                {previewCalc.plannedRR !== null ? `1 : ${previewCalc.plannedRR.toFixed(2)}` : 'N/A'}
               </div>
             </div>
           </div>

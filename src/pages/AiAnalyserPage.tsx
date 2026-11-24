@@ -9,6 +9,7 @@ import {
   detectPatternAlerts,
 } from '../utils/calculations';
 import { convertCurrency, formatCurrency } from '../utils/currency';
+import { parseApiJson } from '../utils/api';
 import { getDateKeyInTimezone, getTodayKeyInTimezone, shiftDateKey } from '../utils/timezone';
 
 export function AiAnalyserPage() {
@@ -157,8 +158,10 @@ export function AiAnalyserPage() {
           groqModel: settings.groqModel,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to generate AI report');
+      const data = await parseApiJson<{ report?: Partial<AiReport['content']> }>(
+        res,
+        'Failed to generate AI report'
+      );
 
       const rawContent = (data.report && typeof data.report === 'object' ? data.report : {}) as Partial<AiReport['content']>;
       const normalizedContent: AiReport['content'] = {
@@ -236,8 +239,7 @@ export function AiAnalyserPage() {
           groqModel: settings.groqModel,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Chat request failed');
+      const data = await parseApiJson<{ answer: string }>(res, 'Chat request failed');
       setChatHistory([...nextHist, { role: 'model', text: data.answer }]);
     } catch (err) {
       setChatHistory([

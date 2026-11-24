@@ -4,6 +4,7 @@ import { PairPlansSection } from '../components/ui/PairPlansSection';
 import { useJournal } from '../context/JournalContext';
 import { PairPlanEntry, WeeklyPlan } from '../types/trading';
 import { calculatePerformance, getTradePnlInDisplayCurrency } from '../utils/calculations';
+import { parseApiJson } from '../utils/api';
 import { formatCurrency } from '../utils/currency';
 import {
   getDateKeyInTimezone,
@@ -179,8 +180,10 @@ export function WeeklyPlanPage() {
           groqModel: settings.groqModel,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to generate AI weekly summary');
+      const data = await parseApiJson<{ summary: string }>(
+        res,
+        'Failed to generate AI weekly summary'
+      );
       setAiSummary(data.summary);
       await saveWeeklyPlan(buildPlanObj(data.summary));
       pushToast('success', 'Generated AI end-of-week summary.');

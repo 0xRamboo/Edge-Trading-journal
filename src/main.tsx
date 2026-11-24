@@ -4,7 +4,15 @@ import App from './App.tsx';
 import './index.css';
 
 if ('serviceWorker' in navigator) {
-  registerSW({immediate: true});
+  if (import.meta.env.DEV) {
+    void navigator.serviceWorker.getRegistrations().then((registrations) => {
+      for (const reg of registrations) {
+        void reg.unregister();
+      }
+    });
+  } else {
+    registerSW({immediate: true});
+  }
 }
 
 createRoot(document.getElementById('root')!).render(<App />);

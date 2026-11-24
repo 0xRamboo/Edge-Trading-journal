@@ -718,7 +718,7 @@ export function AnalysisPage() {
                 <div className="rounded-lg border border-slate-200 dark:border-slate-800 p-3">
                   <div className="text-xs text-slate-500">Avg Planned R:R</div>
                   <div className="mt-1 font-mono text-lg font-semibold text-slate-900 dark:text-slate-100">
-                    {metrics.avgPlannedRR ? `${metrics.avgPlannedRR.toFixed(2)}R` : '—'}
+                    {metrics.avgPlannedRR !== null ? `${metrics.avgPlannedRR.toFixed(2)}R` : 'N/A'}
                   </div>
                 </div>
                 <div className="rounded-lg border border-slate-200 dark:border-slate-800 p-3">

@@ -2,6 +2,7 @@ import {
   Account,
   ChecklistRule,
   HardRiskRules,
+  MarketType,
   Strategy,
   Trade,
   TradeDirection,
@@ -154,7 +155,117 @@ export function computeTradeGrossPnl(params: {
 }
 
 /**
- * Computes Planned R:R and Initial Risk Amount cleanly, returning null if SL is missing or invalid.
+ * Parses a positive finite numeric price, returning null for empty, 0, negative, or non-finite values.
+ */
+export function parsePositivePrice(val: unknown): number | null {
+  if (val === null || val === undefined || val === '') return null;
+  const n = typeof val === 'number' ? val : parseFloat(String(val).replace(/[\s,]/g, ''));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Returns true only when the trade has a positive finite stop-loss on the risk side of entry
+ * with at least 0.002% distance from entry (excludes S/L = 0, missing, breakeven, or trailed-in-profit S/L).
+ */
+export function hasValidStopLoss(trade: {
+  stopLoss: number | null;
+  entryPrice: number;
+  direction?: TradeDirection;
+}): boolean {
+  if (
+    trade.stopLoss === null ||
+    !Number.isFinite(trade.stopLoss) ||
+    trade.stopLoss <= 0 ||
+    !Number.isFinite(trade.entryPrice) ||
+    trade.entryPrice <= 0
+  ) {
+    return false;
+  }
+
+  const dist = Math.abs(trade.entryPrice - trade.stopLoss);
+  if (dist <= 1e-12 || dist / trade.entryPrice < 2e-5) {
+    return false;
+  }
+
+  if (trade.direction === 'LONG' && trade.stopLoss >= trade.entryPrice) {
+    return false;
+  }
+  if (trade.direction === 'SHORT' && trade.stopLoss <= trade.entryPrice) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Returns true only when the trade has a positive finite take-profit on the reward side of entry.
+ */
+export function hasValidTakeProfit(trade: {
+  takeProfit: number | null;
+  entryPrice: number;
+  direction?: TradeDirection;
+}): boolean {
+  if (
+    trade.takeProfit === null ||
+    !Number.isFinite(trade.takeProfit) ||
+    trade.takeProfit <= 0 ||
+    !Number.isFinite(trade.entryPrice) ||
+    trade.entryPrice <= 0
+  ) {
+    return false;
+  }
+
+  const dist = Math.abs(trade.takeProfit - trade.entryPrice);
+  if (dist <= 1e-12 || dist / trade.entryPrice < 2e-5) {
+    return false;
+  }
+
+  if (trade.direction === 'LONG' && trade.takeProfit <= trade.entryPrice) {
+    return false;
+  }
+  if (trade.direction === 'SHORT' && trade.takeProfit >= trade.entryPrice) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Infers normalized market category and contract multiplier from broker symbols (e.g. BTCUSDm, XAUUSDm, USDJPYm, US30m).
+ */
+export function inferMarketAndMultiplier(
+  instrument: string,
+  rawMarket?: string
+): { market: MarketType; multiplier: number } {
+  const inst = (instrument || '').trim().toUpperCase();
+  const rm = (rawMarket || '').trim().toLowerCase();
+
+  if (/(BTC|ETH|SOL|XRP|DOGE|ADA|BNB|AVAX|DOT|LTC|MATIC|LINK|TON|SUI|USDT|USDC)/.test(inst)) {
+    return { market: 'crypto', multiplier: 1 };
+  }
+  if (/XAU/.test(inst)) {
+    return { market: 'forex', multiplier: 100 };
+  }
+  if (/XAG/.test(inst)) {
+    return { market: 'forex', multiplier: 5000 };
+  }
+  if (/(US30|NAS100|USTEC|NDX|SPX|US500|GER40|DE40|UK100|JP225|HK50)/.test(inst)) {
+    return { market: 'stocks', multiplier: 1 };
+  }
+  if (/JPY/.test(inst)) {
+    return { market: 'forex', multiplier: 1000 };
+  }
+  if (/(EUR|GBP|AUD|NZD|USD|CAD|CHF)/.test(inst) && inst.replace(/[^A-Z]/g, '').length <= 8) {
+    return { market: 'forex', multiplier: 100000 };
+  }
+  if (rm === 'crypto') return { market: 'crypto', multiplier: 1 };
+  if (rm === 'stocks') return { market: 'stocks', multiplier: 1 };
+  if (rm === 'forex') return { market: 'forex', multiplier: 100000 };
+  return { market: 'stocks', multiplier: 1 };
+}
+
+/**
+ * Computes Planned R:R and Initial Risk Amount cleanly, returning null if SL is 0, missing, or invalid.
  * Planned R:R = |takeProfit - entryPrice| / |entryPrice - stopLoss|
  * R = netPnl / initialRisk
  */
@@ -165,52 +276,164 @@ export function computeRiskAndR(params: {
   size: number;
   contractMultiplier?: number;
   netPnl: number;
+  direction?: TradeDirection;
   explicitRiskAmount?: number | null;
 }): {
   initialRiskAmount: number | null;
   plannedRR: number | null;
   actualR: number | null;
 } {
+  const validSl = hasValidStopLoss({
+    stopLoss: params.stopLoss,
+    entryPrice: params.entryPrice,
+    direction: params.direction,
+  });
+
+  // Never treat 0, missing, breakeven, or trailed-in-profit stop-loss as an initial risk / R-multiple basis
+  if (!validSl) {
+    return { initialRiskAmount: null, plannedRR: null, actualR: null };
+  }
+
   const mult = params.contractMultiplier && params.contractMultiplier > 0 ? params.contractMultiplier : 1;
   let initialRiskAmount: number | null =
     params.explicitRiskAmount !== undefined &&
     params.explicitRiskAmount !== null &&
+    Number.isFinite(params.explicitRiskAmount) &&
     params.explicitRiskAmount > 0
       ? params.explicitRiskAmount
       : null;
 
-  const hasValidSl =
-    params.stopLoss !== null &&
-    Number.isFinite(params.stopLoss) &&
-    params.stopLoss > 0 &&
-    params.entryPrice > 0 &&
-    Math.abs(params.entryPrice - params.stopLoss) > 1e-12;
-
-  if (initialRiskAmount === null && hasValidSl && params.size > 0) {
+  if (initialRiskAmount === null && params.size > 0) {
     initialRiskAmount = Math.abs(params.entryPrice - (params.stopLoss as number)) * params.size * mult;
+  }
+
+  if (initialRiskAmount === null || !Number.isFinite(initialRiskAmount) || initialRiskAmount < 0.01) {
+    return { initialRiskAmount: null, plannedRR: null, actualR: null };
   }
 
   let plannedRR: number | null = null;
   if (
-    hasValidSl &&
-    params.takeProfit !== null &&
-    Number.isFinite(params.takeProfit) &&
-    params.takeProfit > 0
+    hasValidTakeProfit({
+      takeProfit: params.takeProfit,
+      entryPrice: params.entryPrice,
+      direction: params.direction,
+    })
   ) {
     const riskDist = Math.abs(params.entryPrice - (params.stopLoss as number));
-    const rewardDist = Math.abs(params.takeProfit - params.entryPrice);
+    const rewardDist = Math.abs((params.takeProfit as number) - params.entryPrice);
     if (riskDist > 1e-12) {
-      plannedRR = rewardDist / riskDist;
+      const rr = rewardDist / riskDist;
+      if (Number.isFinite(rr) && rr <= 50) {
+        plannedRR = rr;
+      }
     }
   }
 
   // R = netPnl / initialRisk
   let actualR: number | null = null;
-  if (initialRiskAmount !== null && initialRiskAmount > 1e-9) {
-    actualR = params.netPnl / initialRiskAmount;
+  if (initialRiskAmount > 1e-9) {
+    const r = params.netPnl / initialRiskAmount;
+    if (Number.isFinite(r) && !(initialRiskAmount < 1 && Math.abs(r) > 100)) {
+      actualR = r;
+    }
+  }
+
+  if (actualR === null && plannedRR === null) {
+    return { initialRiskAmount: null, plannedRR: null, actualR: null };
   }
 
   return { initialRiskAmount, plannedRR, actualR };
+}
+
+/**
+ * Sanitizes persisted or newly imported trades so S/L <= 0 or T/P <= 0 become null
+ * and R-multiples / initial risk are nulled whenever no valid initial stop-loss exists.
+ */
+export function sanitizeTradeRiskFields(trade: Trade): Trade {
+  const stopLoss = parsePositivePrice(trade.stopLoss);
+  const takeProfit = parsePositivePrice(trade.takeProfit);
+  const validSl = hasValidStopLoss({
+    stopLoss,
+    entryPrice: trade.entryPrice,
+    direction: trade.direction,
+  });
+  const validTp = hasValidTakeProfit({
+    takeProfit,
+    entryPrice: trade.entryPrice,
+    direction: trade.direction,
+  });
+
+  let market = trade.market;
+  let contractMultiplier = trade.contractMultiplier;
+  let initialRiskAmount = trade.initialRiskAmount;
+  let initialRiskPct = trade.initialRiskPct;
+  let plannedRR = trade.plannedRR;
+  let actualR = trade.actualR;
+
+  if (!validSl) {
+    initialRiskAmount = null;
+    initialRiskPct = null;
+    plannedRR = null;
+    actualR = null;
+  } else {
+    if (!validTp) {
+      plannedRR = null;
+    }
+    const isImported =
+      trade.id.startsWith('pdf-tr-') ||
+      trade.id.startsWith('ss-tr-') ||
+      trade.id.startsWith('csv-');
+    if (isImported) {
+      const inferred = inferMarketAndMultiplier(trade.instrument, trade.market);
+      const recalc = computeRiskAndR({
+        entryPrice: trade.entryPrice,
+        stopLoss,
+        takeProfit,
+        size: trade.size,
+        contractMultiplier: inferred.multiplier,
+        netPnl: trade.netPnl,
+        direction: trade.direction,
+      });
+      market = inferred.market;
+      contractMultiplier = inferred.multiplier;
+      initialRiskAmount = recalc.initialRiskAmount;
+      plannedRR = recalc.plannedRR !== null ? Number(recalc.plannedRR.toFixed(2)) : null;
+      actualR = recalc.actualR !== null ? Number(recalc.actualR.toFixed(2)) : null;
+    } else if (
+      (actualR !== null && (!Number.isFinite(actualR) || (initialRiskAmount !== null && initialRiskAmount < 1 && Math.abs(actualR) > 100))) ||
+      (plannedRR !== null && (!Number.isFinite(plannedRR) || plannedRR > 50))
+    ) {
+      initialRiskAmount = null;
+      initialRiskPct = null;
+      plannedRR = null;
+      actualR = null;
+    }
+  }
+
+  if (
+    stopLoss === trade.stopLoss &&
+    takeProfit === trade.takeProfit &&
+    market === trade.market &&
+    contractMultiplier === trade.contractMultiplier &&
+    initialRiskAmount === trade.initialRiskAmount &&
+    initialRiskPct === trade.initialRiskPct &&
+    plannedRR === trade.plannedRR &&
+    actualR === trade.actualR
+  ) {
+    return trade;
+  }
+
+  return {
+    ...trade,
+    market,
+    contractMultiplier,
+    stopLoss,
+    takeProfit,
+    initialRiskAmount,
+    initialRiskPct,
+    plannedRR,
+    actualR,
+  };
 }
 
 /**
@@ -342,12 +565,13 @@ export function calculatePerformance(
       breakevens += 1;
     }
 
-    if (t.actualR !== null && Number.isFinite(t.actualR)) {
+    const validSl = hasValidStopLoss(t);
+    if (validSl && t.actualR !== null && Number.isFinite(t.actualR)) {
       rValues.push(t.actualR);
       if (pnl > 0.0001) winRs.push(t.actualR);
       else if (pnl < -0.0001) lossRs.push(Math.abs(t.actualR));
     }
-    if (t.plannedRR !== null && Number.isFinite(t.plannedRR)) {
+    if (validSl && hasValidTakeProfit(t) && t.plannedRR !== null && Number.isFinite(t.plannedRR)) {
       plannedRRs.push(t.plannedRR);
     }
     if (pnl > 0 && t.mfe !== null && t.mfe > 0) {
@@ -507,7 +731,7 @@ export function buildBreakdown(
         losses += 1;
         grossLoss += Math.abs(pnl);
       }
-      if (t.actualR !== null && Number.isFinite(t.actualR)) {
+      if (hasValidStopLoss(t) && t.actualR !== null && Number.isFinite(t.actualR)) {
         rs.push(t.actualR);
       }
     }

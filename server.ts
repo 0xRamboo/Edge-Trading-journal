@@ -78,6 +78,126 @@ function stripJsonFences(raw: string): string {
   return raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
 }
 
+function escapeControlCharsInJsonStrings(input: string): string {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (inString) {
+      if (escaped) {
+        out += ch;
+        escaped = false;
+      } else if (ch === '\\') {
+        out += ch;
+        escaped = true;
+      } else if (ch === '"') {
+        out += ch;
+        inString = false;
+      } else if (ch === '\n') {
+        out += '\\n';
+      } else if (ch === '\r') {
+        out += '\\r';
+      } else if (ch === '\t') {
+        out += '\\t';
+      } else {
+        out += ch;
+      }
+    } else {
+      if (ch === '"') inString = true;
+      out += ch;
+    }
+  }
+  return out;
+}
+
+function parseJsonWithRecovery(raw: string): { parsed: unknown; recoveredTruncated: boolean } {
+  const cleaned = stripJsonFences(raw);
+  if (!cleaned) return { parsed: {}, recoveredTruncated: false };
+
+  try {
+    return { parsed: JSON.parse(cleaned), recoveredTruncated: false };
+  } catch {
+    // Fall through to cleanup and truncated-array recovery
+  }
+
+  const sanitized = escapeControlCharsInJsonStrings(cleaned);
+  const firstObj = sanitized.indexOf('{');
+  const firstArr = sanitized.indexOf('[');
+  const start =
+    firstObj === -1 ? firstArr : firstArr === -1 ? firstObj : Math.min(firstObj, firstArr);
+
+  if (start >= 0) {
+    const endChar = sanitized[start] === '[' ? ']' : '}';
+    const lastEnd = sanitized.lastIndexOf(endChar);
+    const candidate = (lastEnd > start ? sanitized.slice(start, lastEnd + 1) : sanitized.slice(start))
+      .replace(/,\s*([}\]])/g, '$1');
+    try {
+      return { parsed: JSON.parse(candidate), recoveredTruncated: false };
+    } catch {
+      // Fall through to object-by-object recovery
+    }
+  }
+
+  // Recover complete trade objects from a truncated JSON array (e.g. Unterminated string mid-stream)
+  const slice = start >= 0 ? sanitized.slice(start) : sanitized;
+  const tradesKeyMatch = /"trades"\s*:\s*\[/i.exec(slice);
+  const arrStart = tradesKeyMatch
+    ? tradesKeyMatch.index + tradesKeyMatch[0].length - 1
+    : slice.indexOf('[');
+  const scanFrom = arrStart >= 0 ? arrStart + 1 : 0;
+  const objects: Array<Record<string, unknown>> = [];
+
+  let inString = false;
+  let escaped = false;
+  let depth = 0;
+  let objStart = -1;
+
+  for (let i = scanFrom; i < slice.length; i++) {
+    const ch = slice[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{') {
+      if (depth === 0) objStart = i;
+      depth += 1;
+    } else if (ch === '}') {
+      if (depth > 0) {
+        depth -= 1;
+        if (depth === 0 && objStart !== -1) {
+          const objText = slice.slice(objStart, i + 1).replace(/,\s*([}\]])/g, '$1');
+          try {
+            const obj = JSON.parse(objText) as unknown;
+            if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+              objects.push(obj as Record<string, unknown>);
+            }
+          } catch {
+            // Skip malformed object
+          }
+          objStart = -1;
+        }
+      }
+    }
+  }
+
+  if (objects.length > 0) {
+    return { parsed: { trades: objects }, recoveredTruncated: true };
+  }
+
+  throw new Error('AI response returned malformed or incomplete JSON. Please retry or switch AI Provider in Settings.');
+}
+
 async function callOpenAiCompatibleProvider(opts: {
   providerLabel: 'OpenRouter' | 'Groq';
   endpoint: typeof OPENROUTER_API_URL | typeof GROQ_API_URL;
@@ -110,11 +230,14 @@ async function callOpenAiCompatibleProvider(opts: {
     messages.push({ role: 'user', content: opts.userText });
   }
 
-  const sendRequest = async (modelId: string, useResponseFormat: boolean) => {
+  const sendRequest = async (modelId: string, useResponseFormat: boolean, includeMaxTokens = true) => {
     const body: Record<string, unknown> = {
       model: modelId,
       messages,
     };
+    if (includeMaxTokens) {
+      body.max_tokens = 8192;
+    }
     if (useResponseFormat) {
       body.response_format = { type: 'json_object' };
     }
@@ -136,17 +259,17 @@ async function callOpenAiCompatibleProvider(opts: {
           provider_name?: string;
         };
       };
-      choices?: Array<{ message?: { content?: string } }>;
+      choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
     };
     return { res, data };
   };
 
   let activeModel = opts.model;
-  let { res, data } = await sendRequest(activeModel, Boolean(opts.jsonMode));
+  let { res, data } = await sendRequest(activeModel, Boolean(opts.jsonMode), true);
 
-  // Retry without response_format if the chosen model rejects json_object
-  if (!res.ok && opts.jsonMode && (res.status === 400 || res.status === 422)) {
-    ({ res, data } = await sendRequest(activeModel, false));
+  // Retry without response_format / max_tokens if the chosen model rejects either option
+  if (!res.ok && (res.status === 400 || res.status === 422)) {
+    ({ res, data } = await sendRequest(activeModel, false, false));
   }
 
   // Brief retry once on transient rate-limit / upstream busy responses
@@ -159,12 +282,11 @@ async function callOpenAiCompatibleProvider(opts: {
     ({ res, data } = await sendRequest(activeModel, Boolean(opts.jsonMode)));
   }
 
-  // If a specific OpenRouter :free model is rate-limited upstream, fall back to OpenRouter's free router
+  // If a specific OpenRouter :free model is rate-limited or unavailable upstream, fall back to OpenRouter's free router (works for both text and vision)
   if (
     !res.ok &&
-    res.status === 429 &&
+    (res.status === 429 || res.status === 404 || res.status === 503) &&
     opts.providerLabel === 'OpenRouter' &&
-    !opts.imageDataUrl &&
     activeModel.endsWith(':free') &&
     activeModel !== 'openrouter/free'
   ) {
@@ -244,11 +366,24 @@ function resolveProviderOrder(requested: AiProvider): ConcreteAiProvider[] {
   return order;
 }
 
+function summarizeProviderFailure(prov: ConcreteAiProvider, err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err ?? 'Unknown error');
+  const label = prov === 'gemini' ? 'Gemini' : prov === 'openrouter' ? 'OpenRouter' : 'Groq';
+  if (/API key not valid|Invalid API Key|UNAUTHENTICATED|401/i.test(raw)) {
+    return `${label}: Invalid or expired API key in Settings > Secrets`;
+  }
+  if (/429|rate-limit|RESOURCE_EXHAUSTED/i.test(raw)) {
+    return `${label}: Rate-limited upstream (429)`;
+  }
+  return raw.startsWith(label) ? raw : `${label}: ${raw}`;
+}
+
 async function executeWithProviderFallback(
   requestedProvider: AiProvider,
   handlers: Record<ConcreteAiProvider, () => Promise<string>>
 ): Promise<{ text: string; usedProvider: ConcreteAiProvider }> {
   const order = resolveProviderOrder(requestedProvider);
+  const failures: string[] = [];
   let lastError: unknown;
   for (const prov of order) {
     try {
@@ -256,7 +391,11 @@ async function executeWithProviderFallback(
       return { text, usedProvider: prov };
     } catch (err) {
       lastError = err;
+      failures.push(summarizeProviderFailure(prov, err));
     }
+  }
+  if (order.length > 1 && failures.length > 1) {
+    throw new Error(`All configured AI providers failed — ${failures.join(' | ')}`);
   }
   throw lastError instanceof Error ? lastError : new Error('All configured AI providers failed.');
 }
@@ -265,10 +404,108 @@ function handleAiError(res: Response, err: unknown) {
   const message = err instanceof Error ? err.message : 'Unexpected AI service error';
   const status =
     message.includes('not configured') || message.includes('No AI API key') ? 503 :
-    message.includes('401') || message.includes('403') || message.includes('PERMISSION_DENIED') || message.includes('Unauthorized') ? 403 :
+    message.includes('401') || message.includes('403') || message.includes('PERMISSION_DENIED') || message.includes('Unauthorized') || message.includes('Invalid or expired API key') ? 502 :
     message.includes('429') || message.includes('RESOURCE_EXHAUSTED') || message.includes('rate') ? 429 :
     message.includes('400') || message.includes('INVALID') ? 400 : 500;
   res.status(status).json({ error: message });
+}
+
+const TRADE_ITEM_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    instrument: { type: Type.STRING },
+    market: { type: Type.STRING },
+    direction: { type: Type.STRING },
+    entryPrice: { type: Type.NUMBER },
+    exitPrice: { type: Type.NUMBER },
+    stopLoss: { type: Type.NUMBER },
+    takeProfit: { type: Type.NUMBER },
+    size: { type: Type.NUMBER },
+    openTime: { type: Type.STRING },
+    closeTime: { type: Type.STRING },
+    netPnl: { type: Type.NUMBER },
+    fees: { type: Type.NUMBER },
+    setup: { type: Type.STRING },
+    extractionNotes: { type: Type.STRING },
+  },
+};
+
+function normalizeExtractedTradesJson(text: string): {
+  trades: Array<{
+    instrument: string;
+    market: 'forex' | 'crypto' | 'stocks';
+    direction: 'LONG' | 'SHORT';
+    entryPrice: number;
+    exitPrice: number;
+    stopLoss: number;
+    takeProfit: number;
+    size: number;
+    openTime: string;
+    closeTime: string;
+    netPnl: number;
+    fees: number;
+    setup: string;
+    extractionNotes: string;
+  }>;
+  truncated: boolean;
+} {
+  const { parsed: rawParsed, recoveredTruncated } = parseJsonWithRecovery(text);
+  const rawList: Array<Record<string, unknown>> = Array.isArray(rawParsed)
+    ? (rawParsed as Array<Record<string, unknown>>)
+    : rawParsed && typeof rawParsed === 'object' && Array.isArray((rawParsed as { trades?: unknown }).trades)
+      ? ((rawParsed as { trades: Array<Record<string, unknown>> }).trades)
+      : rawParsed && typeof rawParsed === 'object' && 'instrument' in (rawParsed as Record<string, unknown>)
+        ? [rawParsed as Record<string, unknown>]
+        : [];
+
+  const toNum = (v: unknown, fallback = 0): number => {
+    const n = typeof v === 'number' ? v : parseFloat(String(v ?? '').replace(/[\s,]/g, ''));
+    return Number.isFinite(n) ? n : fallback;
+  };
+  const normalizeIsoLike = (v: unknown): string => {
+    if (typeof v !== 'string') return '';
+    return v.trim().replace(/^(\d{4})\.(\d{2})\.(\d{2})/, '$1-$2-$3').replace(' ', 'T');
+  };
+  const inferMarket = (inst: string, rawMarket: unknown): 'forex' | 'crypto' | 'stocks' => {
+    if (rawMarket === 'crypto' || rawMarket === 'stocks' || rawMarket === 'forex') {
+      if (/(BTC|ETH|SOL|XRP|DOGE|ADA|BNB|AVAX|USDT|USDC)/i.test(inst)) return 'crypto';
+      return rawMarket;
+    }
+    if (/(BTC|ETH|SOL|XRP|DOGE|ADA|BNB|AVAX|USDT|USDC)/i.test(inst)) return 'crypto';
+    if (/(EUR|GBP|USD|JPY|AUD|NZD|CAD|CHF|XAU|XAG)/i.test(inst) && inst.length <= 8) return 'forex';
+    return 'stocks';
+  };
+
+  const trades = rawList
+    .map((item) => {
+      const instrument = String(item.instrument ?? '').trim().toUpperCase();
+      if (!instrument || /^(BALANCE|DEPOSIT|WITHDRAWAL|CREDIT|PROFIT|TOTAL|SUMMARY)$/i.test(instrument)) {
+        return null;
+      }
+      const dirRaw = String(item.direction ?? '').toUpperCase();
+      const direction: 'LONG' | 'SHORT' = dirRaw === 'SHORT' || dirRaw === 'SELL' ? 'SHORT' : 'LONG';
+      const closeTime = normalizeIsoLike(item.closeTime);
+      const openTime = normalizeIsoLike(item.openTime) || closeTime;
+      return {
+        instrument,
+        market: inferMarket(instrument, item.market),
+        direction,
+        entryPrice: toNum(item.entryPrice, 0),
+        exitPrice: toNum(item.exitPrice, 0),
+        stopLoss: toNum(item.stopLoss, 0),
+        takeProfit: toNum(item.takeProfit, 0),
+        size: toNum(item.size, 0.01),
+        openTime,
+        closeTime,
+        netPnl: toNum(item.netPnl, 0),
+        fees: toNum(item.fees, 0),
+        setup: typeof item.setup === 'string' ? item.setup : '',
+        extractionNotes: typeof item.extractionNotes === 'string' ? item.extractionNotes : '',
+      };
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null);
+
+  return { trades, truncated: recoveredTruncated };
 }
 
 async function startServer() {
@@ -307,15 +544,49 @@ async function startServer() {
       const cleanBase64 = imageBase64.includes(',') ? imageBase64.split(',')[1] : imageBase64;
       const imageDataUrl = `data:${safeMime};base64,${cleanBase64}`;
 
-      const extractionPrompt = `Extract trade execution details from this trading chart or broker order screenshot.
+      const extractionPrompt = `Extract ALL trading executions / closed or open positions visible in this screenshot.
 User defaults: Currency=${String(defaultCurrency || 'USD')}, Timezone=${String(defaultTimezone || 'Asia/Kathmandu')}.
-Return precise numbers where visible. For direction, return LONG or SHORT. For market, infer forex, crypto, or stocks.
-For openTime and closeTime, return ISO 8601 strings if timestamps are visible, otherwise empty string.
-If a numeric field is not visible in the screenshot, return 0 and note what was missing in extractionNotes.
-Return ONLY valid JSON with keys: instrument, market, direction, entryPrice, exitPrice, stopLoss, takeProfit, size, openTime, closeTime, netPnl, fees, setup, extractionNotes.`;
+
+CRITICAL INSTRUCTIONS:
+1. If this screenshot is a multi-row trade history / positions / deals list (such as MetaTrader 4/5 Positions, Exness, Binance, Bybit, or broker history), you MUST extract EVERY visible trade row into the "trades" array in top-to-bottom order. Do NOT stop after 1 trade!
+2. Skip non-trade summary or ledger rows such as "Balance", "Initial deposit", "Deposit", "Withdrawal", "Credit", or total Profit/Swap summary headers.
+3. For MetaTrader / broker rows showing "SYMBOL buy/sell LOT" and "entryPrice -> exitPrice":
+   - "buy" => direction="LONG", "sell" => direction="SHORT"
+   - entryPrice = left number before arrow (→ or ->), exitPrice = right number after arrow
+   - size = lot/volume (e.g., 0.01, 0.05)
+   - netPnl = signed profit/loss number on the row (preserve negative signs!)
+   - Convert timestamps like "2026.11.09 09:43:54" to ISO format "2026-11-09T09:43:54". If only one timestamp is shown per closed trade row, put it in BOTH closeTime and openTime.
+4. For market, infer:
+   - "crypto" for BTC/ETH/SOL/USDT/USDC/crypto pairs (e.g. BTCUSD, ETHUSDT)
+   - "stocks" for stock tickers/indices (e.g. AAPL, NVDA, SPY, US30, NAS100)
+   - "forex" for FX pairs and metals (e.g. EURUSD, AUDNZD, GBPUSD, USDJPY, XAUUSD, XAGUSD)
+5. If a numeric field (like stopLoss, takeProfit, fees) is not visible, return 0 and briefly note what was missing in extractionNotes.
+
+Return ONLY valid JSON object with shape:
+{
+  "trades": [
+    {
+      "instrument": "string",
+      "market": "forex | crypto | stocks",
+      "direction": "LONG | SHORT",
+      "entryPrice": 0,
+      "exitPrice": 0,
+      "stopLoss": 0,
+      "takeProfit": 0,
+      "size": 0,
+      "openTime": "YYYY-MM-DDTHH:MM:SS",
+      "closeTime": "YYYY-MM-DDTHH:MM:SS",
+      "netPnl": 0,
+      "fees": 0,
+      "setup": "",
+      "extractionNotes": ""
+    }
+  ]
+}`;
 
       const orModel = sanitizeModelSlug(openRouterModel, DEFAULT_OPENROUTER_MODEL);
       const groqVisionModel = getGroqVisionModel(groqModel);
+
       const { text, usedProvider } = await executeWithProviderFallback(normalizeProvider(provider), {
         gemini: async () => {
           const ai = getGeminiClient();
@@ -332,30 +603,20 @@ Return ONLY valid JSON with keys: instrument, market, direction, entryPrice, exi
               responseSchema: {
                 type: Type.OBJECT,
                 properties: {
-                  instrument: { type: Type.STRING },
-                  market: { type: Type.STRING },
-                  direction: { type: Type.STRING },
-                  entryPrice: { type: Type.NUMBER },
-                  exitPrice: { type: Type.NUMBER },
-                  stopLoss: { type: Type.NUMBER },
-                  takeProfit: { type: Type.NUMBER },
-                  size: { type: Type.NUMBER },
-                  openTime: { type: Type.STRING },
-                  closeTime: { type: Type.STRING },
-                  netPnl: { type: Type.NUMBER },
-                  fees: { type: Type.NUMBER },
-                  setup: { type: Type.STRING },
-                  extractionNotes: { type: Type.STRING },
+                  trades: {
+                    type: Type.ARRAY,
+                    items: TRADE_ITEM_SCHEMA,
+                  },
                 },
               },
             },
           });
-          return response.text ?? '{}';
+          return response.text ?? '{"trades":[]}';
         },
         openrouter: async () =>
           callOpenRouter({
             model: orModel,
-            systemInstruction: 'You are a precise trade execution vision parser. Always output valid JSON only.',
+            systemInstruction: 'You are a precise multi-trade execution vision parser. Always output valid JSON with a "trades" array containing every visible trade.',
             userText: extractionPrompt,
             imageDataUrl,
             jsonMode: true,
@@ -363,15 +624,100 @@ Return ONLY valid JSON with keys: instrument, market, direction, entryPrice, exi
         groq: async () =>
           callGroq({
             model: groqVisionModel,
-            systemInstruction: 'You are a precise trade execution vision parser. Always output valid JSON only.',
+            systemInstruction: 'You are a precise multi-trade execution vision parser. Always output valid JSON with a "trades" array containing every visible trade.',
             userText: extractionPrompt,
             imageDataUrl,
             jsonMode: true,
           }),
       });
 
-      const parsed = JSON.parse(stripJsonFences(text) || '{}');
-      res.json({ extracted: parsed, usedProvider });
+      const { trades: normalizedTrades, truncated } = normalizeExtractedTradesJson(text);
+
+      res.json({
+        trades: normalizedTrades,
+        extracted: normalizedTrades[0] ?? {},
+        truncated,
+        usedProvider,
+      });
+    } catch (err) {
+      handleAiError(res, err);
+    }
+  });
+
+  // 1b. Extract trade rows from broker/statement PDF text
+  app.post('/api/ai/extract-pdf-trades', async (req: Request, res: Response) => {
+    try {
+      const { pdfText, fileName, defaultCurrency, defaultTimezone, provider, openRouterModel, groqModel } = req.body ?? {};
+      if (typeof pdfText !== 'string' || pdfText.trim().length < 15) {
+        return res.status(400).json({ error: 'Valid extracted PDF text is required.' });
+      }
+      if (pdfText.length > 120_000) {
+        return res.status(400).json({ error: 'PDF chunk exceeds maximum supported length.' });
+      }
+
+      const pdfPrompt = `Extract ALL trading executions / closed or open positions from this broker statement PDF text (${String(fileName || 'statement.pdf')}).
+User defaults: Currency=${String(defaultCurrency || 'USD')}, Timezone=${String(defaultTimezone || 'Asia/Kathmandu')}.
+
+CRITICAL INSTRUCTIONS:
+1. Extract EVERY real trade row (MT4/MT5 Positions/Closed Transactions/Deals, Exness, FTMO, cTrader, IBKR, Binance, TradingView, or custom broker statements) into the "trades" array in chronological or top-to-bottom order.
+2. Ignore non-trade ledger/summary rows: Balance, Deposit, Withdrawal, Credit, Interest, Totals, Open Trades header, Working Orders / Cancelled limit orders (unless filled), and Account Summary tables.
+3. Map "buy" / "long" => "LONG" and "sell" / "short" => "SHORT".
+4. Preserve exact numeric entryPrice, exitPrice, stopLoss (S/L), takeProfit (T/P), size (Volume/Lots/Qty), and signed netPnl (Profit). If commission + swap are shown separately, sum their absolute cost into fees (positive fee number) or 0 if not shown.
+5. Convert timestamps like "2026.11.09 09:43:54" or "2026-11-09 09:43" to ISO format "2026-11-09T09:43:54". If only one time exists, put it in both openTime and closeTime.
+6. Infer market: "crypto" (BTC/ETH/SOL/USDT/USDC), "stocks" (AAPL/NVDA/SPY/US30/NAS100/indices), or "forex" (FX pairs & XAU/XAG metals).
+7. Leave "setup" and "extractionNotes" as empty strings "" to keep output compact. Return COMPACT single-line JSON (no indentation or extra whitespace).
+
+PDF STATEMENT TEXT:
+${pdfText}
+
+Return ONLY valid compact JSON:
+{"trades":[{"instrument":"string","market":"forex","direction":"LONG","entryPrice":0,"exitPrice":0,"stopLoss":0,"takeProfit":0,"size":0,"openTime":"YYYY-MM-DDTHH:MM:SS","closeTime":"YYYY-MM-DDTHH:MM:SS","netPnl":0,"fees":0,"setup":"","extractionNotes":""}]}`;
+
+      const orModel = sanitizeModelSlug(openRouterModel, DEFAULT_OPENROUTER_MODEL);
+      const grModel = sanitizeModelSlug(groqModel, DEFAULT_GROQ_MODEL);
+      const { text, usedProvider } = await executeWithProviderFallback(normalizeProvider(provider), {
+        gemini: async () => {
+          const ai = getGeminiClient();
+          const response = await ai.models.generateContent({
+            model: GEMINI_MODEL_NAME,
+            contents: pdfPrompt,
+            config: {
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  trades: {
+                    type: Type.ARRAY,
+                    items: TRADE_ITEM_SCHEMA,
+                  },
+                },
+              },
+            },
+          });
+          return response.text ?? '{"trades":[]}';
+        },
+        openrouter: async () =>
+          callOpenRouter({
+            model: orModel,
+            systemInstruction: 'You are a precise broker statement PDF parser. Always output valid JSON with a "trades" array containing every trade row.',
+            userText: pdfPrompt,
+            jsonMode: true,
+          }),
+        groq: async () =>
+          callGroq({
+            model: grModel,
+            systemInstruction: 'You are a precise broker statement PDF parser. Always output valid JSON with a "trades" array containing every trade row.',
+            userText: pdfPrompt,
+            jsonMode: true,
+          }),
+      });
+
+      const { trades: normalizedTrades, truncated } = normalizeExtractedTradesJson(text);
+      res.json({
+        trades: normalizedTrades,
+        truncated,
+        usedProvider,
+      });
     } catch (err) {
       handleAiError(res, err);
     }
@@ -569,8 +915,8 @@ STRICT RULES:
           }),
       });
 
-      const rawText = stripJsonFences(text);
-      const parsed = JSON.parse(rawText || '{}') as Record<string, unknown>;
+      const parsedRaw = parseJsonWithRecovery(text).parsed;
+      const parsed = (parsedRaw && typeof parsedRaw === 'object' ? parsedRaw : {}) as Record<string, unknown>;
       const toStrArr = (v: unknown) => (Array.isArray(v) ? v.map((x) => String(x)) : []);
       const report = {
         executiveSummary: typeof parsed.executiveSummary === 'string' ? parsed.executiveSummary : '',
@@ -649,6 +995,26 @@ Answer directly using only the numbers and patterns in the Trader Journal Data S
     } catch (err) {
       handleAiError(res, err);
     }
+  });
+
+  // Never fall through to SPA HTML for /api/* routes
+  app.all('/api/*', (_req: Request, res: Response) => {
+    res.status(404).json({ error: 'API endpoint not found.' });
+  });
+
+  // Return JSON for body-parser / Express middleware errors on /api/*
+  app.use((err: unknown, req: Request, res: Response, next: express.NextFunction) => {
+    if (!req.path.startsWith('/api')) {
+      return next(err);
+    }
+    const errObj = err as { type?: string; status?: number; message?: string };
+    if (errObj?.type === 'entity.too.large' || errObj?.status === 413) {
+      return res.status(413).json({
+        error: 'Uploaded image is too large. Please upload a smaller or cropped chart screenshot.',
+      });
+    }
+    const status = typeof errObj?.status === 'number' && errObj.status >= 400 ? errObj.status : 500;
+    return res.status(status).json({ error: errObj?.message || 'Unexpected server error.' });
   });
 
   if (process.env.NODE_ENV !== 'production') {

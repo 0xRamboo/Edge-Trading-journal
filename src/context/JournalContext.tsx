@@ -26,6 +26,7 @@ import {
   Trade,
   WeeklyPlan,
 } from '../types/trading';
+import { sanitizeTradeRiskFields } from '../utils/calculations';
 import { downloadTextFile, exportTradesToCsv } from '../utils/csvExport';
 import { DEFAULT_CHECKLIST_RULES, generateDemoDataset } from '../utils/demoData';
 import { getDateKeyInTimezone, getTodayKeyInTimezone, shiftDateKey } from '../utils/timezone';
@@ -81,8 +82,8 @@ interface JournalContextValue {
   openTradeModal: (editTrade?: Trade | null, backtestSessionId?: string | null) => void;
   closeTradeModal: () => void;
 
-  importModalState: { open: boolean; initialTab: 'csv' | 'screenshot'; backtestSessionId?: string | null };
-  openImportModal: (tab?: 'csv' | 'screenshot', backtestSessionId?: string | null) => void;
+  importModalState: { open: boolean; initialTab: 'csv' | 'pdf' | 'screenshot'; backtestSessionId?: string | null };
+  openImportModal: (tab?: 'csv' | 'pdf' | 'screenshot', backtestSessionId?: string | null) => void;
   closeImportModal: () => void;
 
   accountsModalOpen: boolean;
@@ -169,7 +170,7 @@ export function JournalProvider({ children }: { children: React.ReactNode }) {
 
   const [importModalState, setImportModalState] = useState<{
     open: boolean;
-    initialTab: 'csv' | 'screenshot';
+    initialTab: 'csv' | 'pdf' | 'screenshot';
     backtestSessionId?: string | null;
   }>({ open: false, initialTab: 'csv' });
 
@@ -226,8 +227,14 @@ export function JournalProvider({ children }: { children: React.ReactNode }) {
         getAllFromStore<AppSettings>('settings'),
       ]);
 
+      const sanitizedTrades = trs.map((t) => sanitizeTradeRiskFields(t));
+      const changedTrades = sanitizedTrades.filter((t, idx) => t !== trs[idx]);
+      if (changedTrades.length > 0) {
+        await putManyInStore('trades', changedTrades);
+      }
+
       setAccounts(accs);
-      setTrades(trs);
+      setTrades(sanitizedTrades);
       setDailyJournals(djs);
       setWeeklyPlans(wps);
       setDailyPlans(dps);
@@ -306,7 +313,7 @@ export function JournalProvider({ children }: { children: React.ReactNode }) {
     setTradeModalState({ open: false, editTrade: null, backtestSessionId: null });
   }, []);
 
-  const openImportModal = useCallback((tab: 'csv' | 'screenshot' = 'csv', backtestSessionId?: string | null) => {
+  const openImportModal = useCallback((tab: 'csv' | 'pdf' | 'screenshot' = 'csv', backtestSessionId?: string | null) => {
     setImportModalState({ open: true, initialTab: tab, backtestSessionId: backtestSessionId ?? null });
   }, []);
 
@@ -330,18 +337,20 @@ export function JournalProvider({ children }: { children: React.ReactNode }) {
   }, [selectedAccountId]);
 
   const saveTrade = useCallback(async (trade: Trade) => {
-    await putInStore('trades', trade);
+    const cleanTrade = sanitizeTradeRiskFields(trade);
+    await putInStore('trades', cleanTrade);
     setTrades((prev) => {
-      const exists = prev.some((t) => t.id === trade.id);
-      return exists ? prev.map((t) => (t.id === trade.id ? trade : t)) : [trade, ...prev];
+      const exists = prev.some((t) => t.id === cleanTrade.id);
+      return exists ? prev.map((t) => (t.id === cleanTrade.id ? cleanTrade : t)) : [cleanTrade, ...prev];
     });
   }, []);
 
   const saveTradesBulk = useCallback(async (newTrades: Trade[]) => {
-    await putManyInStore('trades', newTrades);
+    const cleanTrades = newTrades.map((t) => sanitizeTradeRiskFields(t));
+    await putManyInStore('trades', cleanTrades);
     setTrades((prev) => {
       const map = new Map(prev.map((t) => [t.id, t]));
-      for (const nt of newTrades) map.set(nt.id, nt);
+      for (const nt of cleanTrades) map.set(nt.id, nt);
       return Array.from(map.values());
     });
   }, []);

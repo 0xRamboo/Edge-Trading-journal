@@ -1,7 +1,8 @@
 import React, { useMemo, useState } from 'react';
 import { Brain, Edit3, Loader2, Trash2, X } from 'lucide-react';
 import { useJournal } from '../../context/JournalContext';
-import { calculatePerformance } from '../../utils/calculations';
+import { calculatePerformance, hasValidStopLoss, hasValidTakeProfit } from '../../utils/calculations';
+import { parseApiJson } from '../../utils/api';
 import { formatCurrency, formatR } from '../../utils/currency';
 import { formatDateTimeInTimezone, formatHoldingTime } from '../../utils/timezone';
 
@@ -58,8 +59,7 @@ export function TradeDetailDrawer() {
           groqModel: settings.groqModel,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'AI review request failed');
+      const data = await parseApiJson<{ review: string }>(res, 'AI review request failed');
       await saveTrade({ ...trade, aiReview: data.review, updatedAt: new Date().toISOString() });
       pushToast('success', 'AI trade review generated and saved.');
     } catch (err) {
@@ -153,19 +153,22 @@ export function TradeDetailDrawer() {
             <div>
               <div className="text-xs text-slate-500">Actual R / Planned</div>
               <div className="mt-1 font-mono text-lg font-bold text-slate-900 dark:text-slate-100 tabular-nums">
-                {formatR(trade.actualR)}{' '}
+                {formatR(hasValidStopLoss(trade) ? trade.actualR : null)}{' '}
                 <span className="text-xs font-normal text-slate-500">
-                  / {trade.plannedRR ? `${trade.plannedRR.toFixed(2)}R` : '—'}
+                  /{' '}
+                  {hasValidStopLoss(trade) && hasValidTakeProfit(trade) && trade.plannedRR !== null
+                    ? `${trade.plannedRR.toFixed(2)}R`
+                    : 'N/A'}
                 </span>
               </div>
             </div>
             <div>
               <div className="text-xs text-slate-500">Initial Risk</div>
               <div className="mt-1 font-mono text-sm font-semibold text-slate-900 dark:text-slate-100 tabular-nums">
-                {trade.initialRiskAmount !== null
+                {hasValidStopLoss(trade) && trade.initialRiskAmount !== null
                   ? formatCurrency(trade.initialRiskAmount, account?.currency || 'USD')
                   : 'No SL'}
-                {trade.initialRiskPct !== null ? ` (${trade.initialRiskPct}%)` : ''}
+                {hasValidStopLoss(trade) && trade.initialRiskPct !== null ? ` (${trade.initialRiskPct}%)` : ''}
               </div>
             </div>
             <div>
@@ -181,8 +184,8 @@ export function TradeDetailDrawer() {
             {[
               ['Entry Price', trade.entryPrice],
               ['Exit Price', trade.exitPrice ?? '—'],
-              ['Stop Loss', trade.stopLoss ?? '—'],
-              ['Take Profit', trade.takeProfit ?? '—'],
+              ['Stop Loss', trade.stopLoss !== null && trade.stopLoss > 0 ? trade.stopLoss : 'N/A'],
+              ['Take Profit', trade.takeProfit !== null && trade.takeProfit > 0 ? trade.takeProfit : 'N/A'],
               ['Size / Volume', trade.size],
               ['Fees + Comm + Swap', formatCurrency(trade.fees + trade.commission + trade.swap, account?.currency || 'USD')],
               ['MAE', trade.mae !== null ? formatCurrency(trade.mae, account?.currency || 'USD') : '—'],

@@ -30,6 +30,7 @@ import {
   calculateDisciplineScore,
   calculatePerformance,
   detectPatternAlerts,
+  hasValidStopLoss,
 } from '../utils/calculations';
 import { convertCurrency, formatCurrency, formatR } from '../utils/currency';
 import {
@@ -214,8 +215,8 @@ export function DashboardPage() {
     {
       label: 'Average R',
       value: formatR(metrics.averageR),
-      sub: `Planned avg ${metrics.avgPlannedRR ? `${metrics.avgPlannedRR.toFixed(2)}R` : '—'}`,
-      tone: (metrics.averageR ?? 0) >= 0 ? 'pos' : 'neg',
+      sub: `Planned avg ${metrics.avgPlannedRR !== null ? `${metrics.avgPlannedRR.toFixed(2)}R` : 'N/A'}`,
+      tone: metrics.averageR === null ? 'neutral' : metrics.averageR >= 0 ? 'pos' : 'neg',
     },
     {
       label: 'Avg Win / Avg Loss',
@@ -630,7 +631,7 @@ export function DashboardPage() {
                         {t.setup || '—'}
                       </td>
                       <td className="py-2 text-right font-mono tabular-nums text-slate-700 dark:text-slate-300">
-                        {formatR(t.actualR)}
+                        {formatR(hasValidStopLoss(t) ? t.actualR : null)}
                       </td>
                       <td
                         className={`py-2 text-right font-mono font-semibold tabular-nums ${

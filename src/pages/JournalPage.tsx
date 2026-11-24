@@ -3,6 +3,7 @@ import { BookOpen, ChevronLeft, ChevronRight, Search, Tag, Trash2 } from 'lucide
 import { EmptyState } from '../components/ui/EmptyState';
 import { useJournal } from '../context/JournalContext';
 import { DailyJournal, Trade } from '../types/trading';
+import { hasValidStopLoss } from '../utils/calculations';
 import { formatCurrency, formatR } from '../utils/currency';
 import { formatDateTimeInTimezone, formatHoldingTime, getTodayKeyInTimezone } from '../utils/timezone';
 
@@ -95,7 +96,11 @@ export function JournalPage() {
       if (sortKey === 'openTime') cmp = new Date(a.openTime).getTime() - new Date(b.openTime).getTime();
       else if (sortKey === 'instrument') cmp = a.instrument.localeCompare(b.instrument);
       else if (sortKey === 'netPnl') cmp = a.netPnl - b.netPnl;
-      else if (sortKey === 'actualR') cmp = (a.actualR ?? -999) - (b.actualR ?? -999);
+      else if (sortKey === 'actualR') {
+        const ra = hasValidStopLoss(a) && a.actualR !== null ? a.actualR : -Infinity;
+        const rb = hasValidStopLoss(b) && b.actualR !== null ? b.actualR : -Infinity;
+        cmp = ra - rb;
+      }
       else if (sortKey === 'holdingTimeMinutes') cmp = a.holdingTimeMinutes - b.holdingTimeMinutes;
       return sortDir === 'asc' ? cmp : -cmp;
     });
@@ -408,10 +413,14 @@ export function JournalPage() {
                       </td>
                       <td
                         className={`px-3 py-2.5 text-right font-mono tabular-nums whitespace-nowrap ${
-                          (t.actualR ?? 0) >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'
+                          !hasValidStopLoss(t) || t.actualR === null
+                            ? 'text-slate-400 dark:text-slate-500'
+                            : t.actualR >= 0
+                            ? 'text-emerald-600 dark:text-emerald-400'
+                            : 'text-red-600 dark:text-red-400'
                         }`}
                       >
-                        {formatR(t.actualR)}
+                        {formatR(hasValidStopLoss(t) ? t.actualR : null)}
                       </td>
                       <td
                         className={`px-3 py-2.5 text-right font-mono font-semibold tabular-nums whitespace-nowrap ${
